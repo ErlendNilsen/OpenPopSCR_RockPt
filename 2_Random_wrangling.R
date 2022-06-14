@@ -3,6 +3,7 @@
 library(raster)
 library(sp)
 library(sp)
+library(uuid)
 
 ## Defining some coordinate systems
 
@@ -55,6 +56,21 @@ detectors_small <- tibble(id=seq(1:ncell(Space_state_small)), cell_nr= seq(1:nce
                           y=xyFromCell(Space_state_small,1:ncell(Space_state_small))[,2])
 
 ####################################################################
+###### Creating a spatial points object; 
+
+detectors_small_spldf <- SpatialPointsDataFrame(coords=cbind(detectors_small$x,detectors_small$y), proj4string=crs_temp_utm33, 
+                                                data=tibble(cell_nr=detectors_small$cell_nr), match.ID=TRUE)
+
+detectors_small_spldf_latlong <- sp::spTransform(detectors_small_spldf, crs_temp_longlat) 
+detectors_small_spldf_latlong@data$locationID <- str_c("cellNR_", detectors_small_spldf_latlong@data$cell_nr)
+
+##### And - creating a tibble with lat-long and locationID
+
+detectors_small_LatLong <- tibble(locationID=detectors_small_spldf_latlong@data$locationID, 
+                                  decimalLatitude=detectors_small_spldf_latlong@coords[,2], 
+                                  decimalLongitude=detectors_small_spldf_latlong@coords[,1])
+
+####################################################################
 #### Plotting the detectors: 
 
 pp <- ggplot(detectors_small, aes(x=x, y=y)) +
@@ -82,7 +98,11 @@ occurrences <- d %>% mutate(eventDate=lubridate::date(date)) %>%
                   mutate(organismName=ind_id, 
                          scientificName=if_else(species_dna=="Fjellrype", "Lagopus muta", 
                                                 "Lagopus lagopus")) %>%
-                  filter(!is.na(x))
+                  filter(!is.na(x)) %>%
+                  mutate(taxonID=if_else(scientificName=="Lagopus muta", "https://www.biodiversity.no/4070", "https://www.biodiversity.no/4066"), 
+                  kingdom="Animalia", phylum="Chordata", family="Phasianidae", genus="Lagopus", speciesEpithet=if_else(scientificName=="Lagopus muta", "muta", "lagopus"), 
+                  lifeStage="unknown", occurrenceID=uuid, recordNumber=sample_id, catalogNumber="Genlab_ID", recordedByID="https://orcid.org/0000-0002-5119-8331", 
+                  individualCount=1, occurrenceStatus="Present", organismID="Create a unique ID", basisOfRecord="MaterialSample") 
                   
 ### Overaly trap grid (Space_state_small) to obtain trap ID for each "capture"
 ## Creating sp_SpatialPointsDataFrame
@@ -209,66 +229,119 @@ Line_lengths[Track_lines$transect_id_new[i],2] <- rgeos::gLength(line_temp2)
                   
 ################################################################################
 #### Adding this to a new data set - with one row for each track segment + date + grid cell id
+#### This will be the secondary sessions in the event table. 
 
-Effort <- track_log %>% dplyr::select(transect_id_new, datum, locationID_small, track_seg_point_id_new) %>%
+ effort_secondary <- track_log %>% dplyr::select(transect_id_new, datum, locationID_small, track_seg_point_id_new) %>%
           group_by(transect_id_new) %>%
           slice(which.min(track_seg_point_id_new)) %>%
           ungroup() %>%
-          left_join(., Line_lengths) %>%
+           left_join(., Line_lengths) %>%
+           group_by(datum, locationID_small) %>%
+          summarize(samplingEffort=sum(line_length)) %>%
+          ungroup() %>%
           mutate(eventDate=lubridate::date(datum)) %>%
           mutate(Year=year(eventDate), Month=month(eventDate),
           Day=day(eventDate)) %>%
           mutate(Season=if_else(Month<5, "winter", "spring"), 
-          Session=paste(Year, Season, sep="_"))%>%
-          dplyr::select(-track_seg_point_id_new, -datum)
+          verbatimEventDate=paste(Year, Season, sep="_")) %>%
+          dplyr::select(-datum) %>%
+          mutate(samplingEffort=if_else(samplingEffort==0, 1, samplingEffort)) %>%
+          mutate(locationID=str_c("cellNR_", locationID_small), coordinateUncertaintyInMeters=125, eventRemarks="Secondary_session") %>%
+          left_join(., detectors_small_LatLong)  
 
+### Generating unique IDs for each secondary session - and attach to 
+temp_uuid1 <- tibble(eventID=UUIDgenerate(n=dim(effort_secondary)[1])) 
+effort_secondary <- bind_cols(temp_uuid1, effort_secondary)
+
+### Adding eventID to occurrence table - joining by locationID_small and eventDate; 
+test <- effort_secondary %>% dplyr::select(eventID, eventDate, locationID_small) 
+occurrences <- left_join(occurrences, test) 
+
+##############################################################################################
 ### summarizing effort - example by primary session (can be summarized for other time spans)
-effort_session <- Effort %>% group_by(locationID_small, Session) %>%
-                  dplyr::summarise(tl_effort=sum(line_length))
+effort_primary <- effort_secondary %>% group_by(locationID, verbatimEventDate) %>%
+                  dplyr::summarise(samplingEffort=sum(samplingEffort), 
+                  eventDate_start=min(eventDate), eventDate_stop=max(eventDate)) 
+                  #mutate(eventDate=str_c(eventDate_start, eventDate_stop, sep="/"))  
+                  ## use separate(eventDate, c("start", "stop"), sep="/") to cast back
 
+#### Completing the secondary sessions - including cells that were not surveyed and setting samplingEffort=0
+
+temp <- tibble(verbatimEventDate=rep(unique(effort_primary$verbatimEventDate), each=400), locationID_small=rep(seq(1,400), 7)) %>%
+        mutate(locationID=str_c("cellNR_", locationID_small))
+
+#### joining with effort_primary
+effort_primary <- effort_primary %>% right_join(., temp) %>%
+                  mutate(samplingEffort=replace_na(samplingEffort, 0), 
+                         coordinateUncertaintyInMeters=125, eventRemarks="Primary_session") %>%
+                  left_join(., detectors_small_LatLong)
+
+### Generating unique IDs for each secondary session - and attach to 
+temp2_uuid <- tibble(eventID=UUIDgenerate(n=dim(effort_primary)[1])) 
+effort_primary <- bind_cols(temp2_uuid , effort_primary)
+
+### Extracting the events + locationID and verbatimEventDate, 
+### as this will be the parentEventID
+
+temp <- effort_primary %>% dplyr::select(eventID, locationID, verbatimEventDate) %>%
+        rename(parentEventID=eventID)
+effort_secondary <- effort_secondary  %>% left_join(., temp)
+
+############################################################################################
+############################################################################################
+#### Adding primary and secondary sessions together in one event table;
+
+primary_short <- effort_primary %>% dplyr::select(eventID, verbatimEventDate, samplingEffort, locationID, decimalLatitude, decimalLongitude, eventRemarks) %>%
+                 mutate(coordinateUncertaintyInMeters=125)
+
+secondary_short <- effort_secondary %>% dplyr::select(eventID, parentEventID, eventDate, verbatimEventDate, eventRemarks, samplingEffort, locationID, decimalLatitude, decimalLongitude, coordinateUncertaintyInMeters) 
+                   
+
+event_table <- bind_rows(secondary_short, primary_short) %>%
+                mutate(country="Norway", countryCode="NO", stateProvince="Trøndelag", municipality="Lierne", locality="Lifjellet", geodeticDatum="EPSG:4326")
+
+## To do: Add footprintWKT, footprintSRS
+
+occurrence_table <- occurrences %>% dplyr::select(eventID, eventDate, occurrenceID, basisOfRecord, recordNumber, catalogNumber, organismName, organismID, 
+                                                  scientificName, lifeStage, sex, individualCount, 
+                                                  taxonID, kingdom, phylum, family, genus, speciesEpithet, 
+                                                  occurrenceStatus, recordedByID)
 
 ############################################################################################
 ############################################################################################
 ### Plotting nice raster maps with effort pr small cell: 
 
-effort_raster <- Space_state_small
-
-temp <- tibble(locationID_small=seq(1,ncell(Space_state_small)))
-temp2 <- unique(effort_session$Session)
-
-effort_map <- tibble(locationID_small=numeric(), Session=character(), tl_effort=numeric())
-
-## by session:
-for(i in 1:length(temp2)){
-effort_temp <- effort_session %>% filter(Session==temp2[i]) %>% 
-               right_join(.,temp) %>%
-               arrange(locationID_small) %>%
-               mutate(tl_effort=replace_na(tl_effort, 0), Session=replace_na(Session, temp2[i]))
-effort_map <- bind_rows(effort_map, effort_temp)
-                        }
- 
-effort_map <- effort_map %>% mutate(cell_nr=locationID_small) %>% 
-              left_join(., detectors_small) %>%
-              mutate(Effort=if_else(tl_effort<500, tl_effort, 500)) %>%
-              mutate(Session2=factor(Session, levels=c("2014_winter", "2014_spring",
+effort_map2 <- event_table %>% filter(eventRemarks=="Primary_session") %>%
+              mutate(samplingEffort=if_else(samplingEffort>500, 500, samplingEffort)) %>%
+              mutate(verbatimEventDate=factor(verbatimEventDate, levels=c("2014_spring",
                                            "2015_winter", "2015_spring", 
                                            "2016_winter", "2016_spring", 
                                            "2017_winter", "2017_spring")))
 
+## converting to UTM 33 - to create a regularly spaced grid;
+##use integer-values to ensure regularity; 
+
+temp_points <- sp::SpatialPoints(coords = cbind(effort_map2$decimalLongitude, effort_map2$decimalLatitude), proj4string=crs_temp_longlat)
+temp_points <- sp::spTransform(temp_points, crs_temp_utm33)
+temp <- tibble(x=as.integer(temp_points@coords[,1]), y=as.integer(temp_points@coords[,2]))
+effort_map2 <- bind_cols(effort_map2, temp)
 
 ## Plotting effort by session; 
 
 m2 <- ggplot() +
-  xlab("UTM - easting") + 
-  ylab("UTM - northing") +
-  geom_raster(data=effort_map, aes(x=x, y=y, fill=Effort), interpolate=TRUE) +
-  scale_fill_viridis_c(alpha=0.7) +
-  facet_wrap(~Session2) +
-  theme_light() + 
+  xlab("UTM Easting") + 
+  ylab("UTM Northing") +
+  geom_raster(data=effort_map2, aes(x=x, y=y, fill=samplingEffort), interpolate=TRUE) +
+  scale_fill_viridis_c(alpha=0.6) +
+  facet_wrap(~verbatimEventDate) +
+  theme_bw() + 
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
   labs(fill="Effort")
 
 m2
+
+
+
 
 
 
