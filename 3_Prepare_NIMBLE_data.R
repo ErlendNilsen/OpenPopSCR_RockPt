@@ -10,8 +10,8 @@ source("5_functions.R")
 ### 0. Loading data - produced with "1_Random_wrangling.R"
 ################################################################################
 
-event_table <- read_csv("event.csv")
-occurrence_table <- read_csv("occurrences.csv")
+event_table <- read_csv("data/event.csv")
+occurrence_table <- read_csv("data/occurrences.csv")
 
 
 ################################################################################
