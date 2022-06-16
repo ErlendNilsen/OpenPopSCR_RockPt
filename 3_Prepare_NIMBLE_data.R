@@ -3,19 +3,24 @@
 library(abind)
 library(tidyverse)
 library(reshape2)
+source("5_functions.R")
+
+event_table <- read_csv("event.csv")
+occurrence_table <- read_csv("occurrences.csv")
+
 
 ########################################################################################
 ########################################################################################
 ## 1: Filtering the relevant data. In this case, only data from the spring sampling
 
-event_table_spring <- event_table %>% mutate(season=verbatimEventDate) %>%
+event_table_use <- event_table %>% mutate(season=verbatimEventDate) %>%
                     separate(season, c("year", "season"), sep="_") %>%
                     filter(season=="spring")
 
-temp <- event_table_spring %>% filter (eventRemarks=="Secondary_session") %>% 
+temp <- event_table_use %>% filter (eventRemarks=="Secondary_session") %>% 
         dplyr::select(eventID, eventDate, locationID)
 
-occurrence_table_spring <- inner_join(occurrence_table, temp)
+occurrence_table_use <- inner_join(occurrence_table, temp)
 
 #######################################################################################
 #######################################################################################
@@ -23,15 +28,15 @@ occurrence_table_spring <- inner_join(occurrence_table, temp)
 ## This is a 3D array with dimension n_birds x n_dertectors x n_sessions
 
 ## Extracting the relevant columns; 
-temp <- event_table_spring %>% dplyr::select(eventID, locationID, parentEventID)
+temp <- event_table_use %>% dplyr::select(eventID, locationID, parentEventID)
 
 ##  same - for the primary sessions
-temp2 <- event_table_spring %>% filter(eventRemarks=="Primary_session") %>% 
+temp2 <- event_table_use %>% filter(eventRemarks=="Primary_session") %>% 
         dplyr::select(eventID, locationID, verbatimEventDate)  
 
 ## Creating tibble  from event- and occurence tables, 
 ## with n_detections, organismName, locationID and eventID
-temp_rpt <- occurrence_table_spring %>% filter(scientificName=="Lagopus muta") %>%
+temp_rpt <- occurrence_table_use %>% filter(scientificName=="Lagopus muta") %>%
             left_join(., temp) %>%
             group_by(parentEventID, organismName) %>%
             summarise(n_detections=n()) %>%
@@ -90,7 +95,7 @@ upperHabCoords <- tibble(x=rep(seq(min(bounding_box$x)+250, max(bounding_box$x),
 ################################################################################
 #### detCovs; we use track logs for each detector each session
 
-temp_detCovs <- event_table_spring %>% filter(eventRemarks=="Primary_session")%>%
+temp_detCovs <- event_table_use %>% filter(eventRemarks=="Primary_session")%>%
   mutate(verbatimEventDate=factor(verbatimEventDate, levels=c("2014_spring",
                                                               "2015_winter", "2015_spring", 
                                                               "2016_winter", "2016_spring", 
@@ -107,7 +112,7 @@ detCov <- reshape2::acast(temp_detCovs, cell_numerical~verbatimEventDate,
 ################################################################################
 #### detector.xy
 
-temp_xy <- event_table_spring %>% filter(eventRemarks=="Primary_session" & verbatimEventDate=="2014_spring") 
+temp_xy <- event_table_use %>% filter(eventRemarks=="Primary_session" & verbatimEventDate=="2014_spring") 
 
 temp_xy_sp <- SpatialPoints(coords=cbind(temp_xy$decimalLongitude,temp_xy$decimalLatitude), 
                             proj4string=crs_temp_longlat)

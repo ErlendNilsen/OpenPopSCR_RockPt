@@ -307,6 +307,10 @@ occurrence_table <- occurrences %>% dplyr::select(eventID, eventDate, occurrence
                                                   taxonID, kingdom, phylum, family, genus, speciesEpithet, 
                                                   occurrenceStatus, recordedByID)
 
+write_csv(event_table, "event.csv")
+write_csv(occurrence_table, "occurrences.csv")
+
+
 ############################################################################################
 ############################################################################################
 ### Plotting nice raster maps with effort pr small cell: 
